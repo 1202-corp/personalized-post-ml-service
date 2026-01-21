@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     
     # Embedding generation settings
     use_local_embeddings: bool = False  # Use local model instead of cloud API
-    local_embedding_model_url: str = "http://localhost:11434/api/embeddings"
+    # Default uses Docker service name (ollama) - change to localhost if running outside Docker
+    local_embedding_model_url: str = "http://ollama:11434/api/embeddings"
     local_embedding_model: str = "all-minilm"  # Model name for local API
     
     # Cloud API settings (when use_local_embeddings=False)

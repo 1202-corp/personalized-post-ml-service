@@ -12,7 +12,12 @@ class Settings(BaseSettings):
     # App settings
     debug: bool = False
     
-    # OpenAI-compatible API settings
+    # Embedding generation settings
+    use_local_embeddings: bool = False  # Use local model instead of cloud API
+    local_embedding_model_url: str = "http://localhost:11434/api/embeddings"
+    local_embedding_model: str = "all-minilm"  # Model name for local API
+    
+    # Cloud API settings (when use_local_embeddings=False)
     openai_api_base: str = "https://bothub.chat/api/v2/openai/v1"
     openai_api_key: str = ""
     embedding_model: str = "text-embedding-ada-002"

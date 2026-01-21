@@ -24,8 +24,7 @@ from app.logging_config import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
-# Minimum interactions required for training
-MIN_INTERACTIONS_FOR_TRAINING = 5
+# Minimum interactions required for training - now from settings
 
 
 async def train_model(session: AsyncSession, user_telegram_id: int) -> tuple[bool, str, float]:
@@ -51,9 +50,9 @@ async def train_model(session: AsyncSession, user_telegram_id: int) -> tuple[boo
     interactions = await InteractionRepository.get_by_user_id(session, user.id)
     interaction_count = len(interactions)
     
-    if interaction_count < MIN_INTERACTIONS_FOR_TRAINING:
+    if interaction_count < settings.min_interactions_for_training:
         training_time = time.time() - start_time
-        return False, f"Need at least {MIN_INTERACTIONS_FOR_TRAINING} interactions, got {interaction_count}", training_time
+        return False, f"Need at least {settings.min_interactions_for_training} interactions, got {interaction_count}", training_time
     
     try:
         # Get user's interactions with posts
@@ -229,7 +228,7 @@ async def get_recommended_posts(
             preference_vector,
             cluster_centroids,
             top_k=5,
-            similarity_threshold=0.5
+            similarity_threshold=settings.default_similarity_threshold
         )
         
         # Get posts from similar clusters (pre-filter)
@@ -237,7 +236,7 @@ async def get_recommended_posts(
         filtered_posts = await cluster_service.get_posts_from_clusters(
             session,
             cluster_ids,
-            limit=(limit + len(exclude_ids)) * 3  # Get more candidates from clusters
+            limit=(limit + len(exclude_ids)) * settings.cluster_search_multiplier
         )
         
         filtered_post_ids = [p.id for p in filtered_posts if p.id not in exclude_ids]
@@ -245,7 +244,7 @@ async def get_recommended_posts(
         # If we have filtered posts from clusters, use them for search
         # Otherwise fallback to full search
         if filtered_post_ids:
-            search_limit = min(limit * 5, len(filtered_post_ids))  # Search more from clusters
+            search_limit = min(limit * settings.cluster_search_max_multiplier, len(filtered_post_ids))
         else:
             search_limit = limit + len(exclude_ids)
         
@@ -253,7 +252,7 @@ async def get_recommended_posts(
         results = await qdrant_service.search_similar_posts(
             query_vector=preference_vector,
             limit=search_limit,
-            score_threshold=0.3,
+            score_threshold=settings.default_score_threshold,
         )
         
         # Filter results to only posts from similar clusters
@@ -287,8 +286,8 @@ async def check_training_eligibility(session: AsyncSession, user_telegram_id: in
     interactions = await InteractionRepository.get_by_user_id(session, user.id)
     interaction_count = len(interactions)
     
-    if interaction_count < MIN_INTERACTIONS_FOR_TRAINING:
-        return False, f"Need {MIN_INTERACTIONS_FOR_TRAINING - interaction_count} more interactions"
+    if interaction_count < settings.min_interactions_for_training:
+        return False, f"Need {settings.min_interactions_for_training - interaction_count} more interactions"
     
     return True, "Ready for training"
 

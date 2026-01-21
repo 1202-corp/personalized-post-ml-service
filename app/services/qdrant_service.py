@@ -27,7 +27,7 @@ def get_qdrant_client() -> QdrantClient:
         _qdrant_client = QdrantClient(
             host=settings.qdrant_host,
             port=settings.qdrant_port,
-            timeout=30,  # Connection timeout in seconds
+            timeout=settings.qdrant_timeout,
         )
         logger.info(f"Initialized Qdrant client: {settings.qdrant_host}:{settings.qdrant_port}")
     return _qdrant_client
@@ -230,7 +230,7 @@ async def get_user_preference_vector(
     
     # Optionally subtract disliked embeddings (with lower weight)
     if disliked_embeddings:
-        dislike_weight = 0.3
+        dislike_weight = settings.dislike_weight
         dislike_avg = [0.0] * dim
         
         for emb in disliked_embeddings:

@@ -25,10 +25,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Default clustering parameters
-DEFAULT_N_CLUSTERS = 50  # Number of clusters to create
-MIN_POSTS_PER_CLUSTER = 10  # Minimum posts needed to form a cluster
-CLUSTER_SIMILARITY_THRESHOLD = 0.7  # Minimum cosine similarity to assign post to cluster
+# Default clustering parameters - now from settings
 
 
 async def get_cluster_centroids(
@@ -79,7 +76,7 @@ async def find_similar_clusters(
     query_vector: List[float],
     cluster_centroids: Dict[int, List[float]],
     top_k: int = 5,
-    similarity_threshold: float = 0.5
+    similarity_threshold: Optional[float] = None
 ) -> List[Tuple[int, float]]:
     """
     Find clusters most similar to query vector.
@@ -88,6 +85,9 @@ async def find_similar_clusters(
     """
     if not cluster_centroids:
         return []
+    
+    if similarity_threshold is None:
+        similarity_threshold = settings.default_similarity_threshold
     
     similarities = []
     for cluster_id, centroid in cluster_centroids.items():
@@ -165,8 +165,8 @@ async def assign_post_to_cluster(
 
 async def recalculate_clusters(
     session: AsyncSession,
-    n_clusters: int = DEFAULT_N_CLUSTERS,
-    min_posts: int = MIN_POSTS_PER_CLUSTER
+    n_clusters: Optional[int] = None,
+    min_posts: Optional[int] = None
 ) -> Dict[str, int]:
     """
     Recalculate clusters for all posts using K-means-like approach.
@@ -178,21 +178,26 @@ async def recalculate_clusters(
     # Get all posts with embeddings
     all_posts = await PostRepository.get_all(session)
     
+    if min_posts is None:
+        min_posts = settings.min_posts_per_cluster
+    if n_clusters is None:
+        n_clusters = settings.default_n_clusters
+    
     if len(all_posts) < min_posts:
-        logger.warning(f"Not enough posts for clustering: {len(posts_with_embeddings)} < {min_posts}")
+        logger.warning(f"Not enough posts for clustering: {len(all_posts)} < {min_posts}")
         return {
             "status": "insufficient_posts",
             "total_posts": len(all_posts),
             "clusters_created": 0
         }
     
-    post_ids = [p.id for p in posts_with_embeddings]
+    post_ids = [p.id for p in all_posts]
     embeddings_dict = await get_post_embeddings_batch(post_ids)
     
     # Filter posts that have embeddings
     valid_posts = []
     valid_embeddings = []
-    for post in posts_with_embeddings:
+    for post in all_posts:
         if post.id in embeddings_dict:
             valid_posts.append(post)
             valid_embeddings.append(embeddings_dict[post.id])
@@ -210,7 +215,11 @@ async def recalculate_clusters(
     
     try:
         # Perform K-means clustering
-        kmeans = KMeans(n_clusters=actual_n_clusters, random_state=42, n_init=10)
+        kmeans = KMeans(
+            n_clusters=actual_n_clusters,
+            random_state=settings.kmeans_random_state,
+            n_init=settings.kmeans_n_init
+        )
         cluster_labels = kmeans.fit_predict(valid_embeddings)
         
         # Assign cluster IDs to posts

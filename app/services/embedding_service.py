@@ -19,7 +19,7 @@ def get_http_client() -> httpx.AsyncClient:
     """Get or create HTTP client."""
     global _http_client
     if _http_client is None:
-        _http_client = httpx.AsyncClient(timeout=60.0)
+        _http_client = httpx.AsyncClient(timeout=settings.embedding_timeout)
     return _http_client
 
 
@@ -48,7 +48,7 @@ async def get_embedding(text: str) -> Optional[List[float]]:
         client = get_http_client()
         
         # Truncate text if too long
-        text = text[:8000]
+        text = text[:settings.max_text_length]
         
         if settings.use_local_embeddings:
             # Use local embedding model (e.g., Ollama)
@@ -74,7 +74,7 @@ async def _get_local_embedding(client: httpx.AsyncClient, text: str) -> Optional
                 "model": settings.local_embedding_model,
                 "prompt": text,  # Ollama uses "prompt"
             },
-            timeout=60.0
+            timeout=settings.embedding_timeout
         )
         
         if response.status_code != 200:
@@ -85,11 +85,11 @@ async def _get_local_embedding(client: httpx.AsyncClient, text: str) -> Optional
                     "model": settings.local_embedding_model,
                     "input": text,  # OpenAI-compatible format
                 },
-                timeout=60.0
+                timeout=settings.embedding_timeout
             )
         
         if response.status_code != 200:
-            logger.error(f"Local embedding API error {response.status_code}: {response.text[:500]}")
+            logger.error(f"Local embedding API error {response.status_code}: {response.text[:settings.error_text_limit]}")
             return None
         
         data = response.json()
@@ -126,7 +126,7 @@ async def _get_cloud_embedding(client: httpx.AsyncClient, text: str) -> Optional
     )
     
     if response.status_code != 200:
-        logger.error(f"Embedding API error {response.status_code}: {response.text[:500]}")
+        logger.error(f"Embedding API error {response.status_code}: {response.text[:settings.error_text_limit]}")
         return None
     
     data = response.json()
@@ -148,7 +148,7 @@ async def get_embeddings_batch(texts: List[str]) -> List[Optional[List[float]]]:
     
     for i, text in enumerate(texts):
         if text and text.strip():
-            processed_texts.append(text[:8000])
+            processed_texts.append(text[:settings.max_text_length])
             valid_indices.append(i)
     
     if not processed_texts:
@@ -185,7 +185,7 @@ async def get_embeddings_batch(texts: List[str]) -> List[Optional[List[float]]]:
             )
             
             if response.status_code != 200:
-                logger.error(f"Embedding API error {response.status_code}: {response.text[:500]}")
+                logger.error(f"Embedding API error {response.status_code}: {response.text[:settings.error_text_limit]}")
                 return [None] * len(texts)
             
             data = response.json()

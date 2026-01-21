@@ -13,10 +13,7 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Cost tracking (GPT-4o-mini pricing as of 2024)
-# Input: $0.15 per 1M tokens, Output: $0.60 per 1M tokens
-COST_PER_1K_INPUT_TOKENS = 0.00015
-COST_PER_1K_OUTPUT_TOKENS = 0.0006
+# Cost tracking - now from settings
 
 # Running cost tracker
 _total_cost = 0.0
@@ -91,7 +88,7 @@ Example: [3, 0, 7, 1, 4]
 Return the top {top_k} indices only."""
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=settings.llm_timeout) as client:
             api_base = settings.openai_api_base.rstrip("/")
             
             response = await client.post(
@@ -106,8 +103,8 @@ Return the top {top_k} indices only."""
                         {"role": "system", "content": "You are a content recommendation expert. Respond only with JSON."},
                         {"role": "user", "content": prompt}
                     ],
-                    "temperature": 0.3,
-                    "max_tokens": 100,
+                    "temperature": settings.llm_temperature,
+                    "max_tokens": settings.llm_max_tokens,
                 }
             )
             
@@ -122,8 +119,8 @@ Return the top {top_k} indices only."""
             input_tokens = usage.get("prompt_tokens", 0)
             output_tokens = usage.get("completion_tokens", 0)
             
-            cost = (input_tokens / 1000 * COST_PER_1K_INPUT_TOKENS + 
-                   output_tokens / 1000 * COST_PER_1K_OUTPUT_TOKENS)
+            cost = (input_tokens / 1000 * settings.cost_per_1k_input_tokens + 
+                   output_tokens / 1000 * settings.cost_per_1k_output_tokens)
             _total_cost += cost
             _request_count += 1
             

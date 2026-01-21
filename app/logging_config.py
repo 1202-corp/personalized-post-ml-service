@@ -7,7 +7,7 @@ from pathlib import Path
 
 def setup_logging(
     log_level: str = "INFO",
-    log_dir: str = "/var/log/ppb",
+    log_dir: str = "/var/log/ppp",
     log_file: str = "ml-service.log",
     max_bytes: int = 10 * 1024 * 1024,
     backup_count: int = 5,

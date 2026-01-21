@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
     # PostgreSQL database (read-only access to main DB)
-    database_url: str = "postgresql+asyncpg://ppb_user:ppb_secret@postgres:5432/ppb_db"
+    database_url: str = "postgresql+asyncpg://ppp_user:ppp_secret@postgres:5432/ppp_db"
     
     # App settings
     debug: bool = False

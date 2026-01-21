@@ -12,7 +12,7 @@ from app.routers import ml, clusters
 # Configure logging
 setup_logging(
     log_level=os.getenv("LOG_LEVEL", "INFO"),
-    log_dir=os.getenv("LOG_DIR", "/var/log/ppb"),
+    log_dir=os.getenv("LOG_DIR", "/var/log/ppp"),
     log_file="ml-service.log",
 )
 logger = get_logger(__name__)

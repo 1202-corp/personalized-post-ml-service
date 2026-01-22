@@ -60,7 +60,6 @@ class User(Base):
     # Relationships
     channels: Mapped[List["UserChannel"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     interactions: Mapped[List["Interaction"]] = relationship(back_populates="user", cascade="all, delete-orphan")
-    logs: Mapped[List["UserLog"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     
     __table_args__ = (
         Index("idx_user_status", "status"),

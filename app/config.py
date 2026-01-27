@@ -36,7 +36,6 @@ class Settings(BaseSettings):
     error_text_limit: int = 500  # Maximum error text length in logs
     
     # ML Training settings
-    min_interactions_for_training: int = 5  # Minimum user interactions required for model training
     default_similarity_threshold: float = 0.5  # Default similarity threshold for recommendations
     default_score_threshold: float = 0.3  # Default score threshold for Qdrant search
     cluster_search_multiplier: int = 3  # Multiplier for expanding cluster search

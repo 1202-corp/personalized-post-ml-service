@@ -50,9 +50,10 @@ async def train_model(session: AsyncSession, user_telegram_id: int) -> tuple[boo
     interactions = await InteractionRepository.get_by_user_id(session, user.id)
     interaction_count = len(interactions)
     
-    if interaction_count < settings.min_interactions_for_training:
+    # Require at least one interaction to train; full training flow уже гарантирует достаточное количество
+    if interaction_count == 0:
         training_time = time.time() - start_time
-        return False, f"Need at least {settings.min_interactions_for_training} interactions, got {interaction_count}", training_time
+        return False, "Need at least 1 interaction to train", training_time
     
     try:
         # Get user's interactions with posts
@@ -286,8 +287,8 @@ async def check_training_eligibility(session: AsyncSession, user_telegram_id: in
     interactions = await InteractionRepository.get_by_user_id(session, user.id)
     interaction_count = len(interactions)
     
-    if interaction_count < settings.min_interactions_for_training:
-        return False, f"Need {settings.min_interactions_for_training - interaction_count} more interactions"
+    if interaction_count == 0:
+        return False, "Need at least 1 interaction to start training"
     
     return True, "Ready for training"
 

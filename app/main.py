@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import close_db
 from app.config import get_settings
 from app.logging_config import setup_logging, get_logger
-from app.routers import ml, clusters
+from app.routers import ml, taste_clusters
 
 # Configure logging
 setup_logging(
@@ -47,9 +47,9 @@ app = FastAPI(
 #     allow_headers=["*"],
 # )
 
-# Include routers
+# Include routers (taste_clusters only; post-clusters removed per plan)
 app.include_router(ml.router, prefix="/api/v1")
-app.include_router(clusters.router, prefix="/api/v1")
+app.include_router(taste_clusters.router, prefix="/api/v1")
 
 
 @app.get("/health")

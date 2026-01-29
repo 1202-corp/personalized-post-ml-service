@@ -1,7 +1,7 @@
 """Post ORM model."""
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy import BigInteger, Text, String, Boolean, ForeignKey, DateTime, Index, Integer
+from sqlalchemy import BigInteger, Text, String, Boolean, ForeignKey, DateTime, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -20,9 +20,6 @@ class Post(Base):
     
     # ML score (0.0 - 1.0) - relevance score for recommendations
     relevance_score: Mapped[Optional[float]] = mapped_column(nullable=True)
-    
-    # Clustering field - posts are grouped into clusters for optimized search
-    cluster_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
     
     posted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
@@ -44,6 +41,5 @@ class Post(Base):
         Index("idx_post_channel_message", "channel_id", "telegram_message_id", unique=True),
         Index("idx_post_relevance", "relevance_score"),
         Index("idx_post_is_deleted", "is_deleted"),
-        Index("idx_post_cluster_id", "cluster_id"),
     )
 

@@ -13,8 +13,8 @@ class UserChannel(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), nullable=False)
     
-    is_for_training: Mapped[bool] = mapped_column(Boolean, default=False)
     is_bonus: Mapped[bool] = mapped_column(Boolean, default=False)
+    mailing_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     

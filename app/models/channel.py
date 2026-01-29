@@ -16,8 +16,7 @@ class Channel(Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
-    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
-    
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), 

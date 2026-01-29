@@ -1,12 +1,13 @@
 """User repository for ML Service."""
 from typing import Optional, List
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User, UserStatus
+from app.repositories.user_preference_vector_repository import UserPreferenceVectorRepository
 
 
 class UserRepository:
-    """Repository for user operations (read-only + preference_vector_cache update)."""
+    """Repository for user operations (read-only)."""
     
     @staticmethod
     async def get_by_id(db: AsyncSession, user_id: int) -> Optional[User]:
@@ -29,25 +30,15 @@ class UserRepository:
             )
         )
         return result.scalar_one_or_none()
-    
+
     @staticmethod
     async def update_preference_vector(
         db: AsyncSession,
         user_id: int,
-        preference_vector: List[float]
+        preference_vector: List[float],
     ) -> bool:
-        """Update user's preference vector cache (with commit)."""
-        from datetime import datetime
-        result = await db.execute(
-            update(User)
-            .where(
-                User.id == user_id,
-                User.is_deleted == False
-            )
-            .values(
-                preference_vector_cache=preference_vector,
-                preference_vector_updated_at=datetime.utcnow()
-            )
+        """Update user's preference vector cache."""
+        return await UserPreferenceVectorRepository.upsert(
+            db, user_id, preference_vector
         )
-        return result.rowcount > 0
 

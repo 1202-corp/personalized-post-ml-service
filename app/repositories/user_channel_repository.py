@@ -35,7 +35,7 @@ class UserChannelRepository:
             .join(User)
             .where(
                 User.id == user_id,
-                UserChannel.is_for_training == True,
+                UserChannel.is_bonus == False,
                 User.is_deleted == False,
                 Channel.is_deleted == False
             )

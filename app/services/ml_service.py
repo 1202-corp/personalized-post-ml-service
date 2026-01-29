@@ -11,11 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.services import embedding_service, qdrant_service
 from app.repositories.user_repository import UserRepository
+from app.repositories.user_preference_vector_repository import UserPreferenceVectorRepository
 from app.repositories.post_repository import PostRepository
 from app.repositories.interaction_repository import InteractionRepository
 from app.repositories.user_channel_repository import UserChannelRepository
 from app.repositories.channel_repository import ChannelRepository
 from app.models.user import UserStatus, User
+from app.models.user_channel import UserChannel
 from app.models.post import Post
 from app.models.channel import Channel
 from app.models.interaction import InteractionType
@@ -79,6 +81,12 @@ async def train_model(session: AsyncSession, user_telegram_id: int) -> tuple[boo
         # Save preference vector to user cache
         await UserRepository.update_preference_vector(session, user.id, preference_vector)
         
+        # Assign user to nearest taste cluster (for post-centric delivery)
+        from app.services import taste_cluster_service
+        await taste_cluster_service.assign_user_to_nearest_cluster(
+            session, user.id, preference_vector
+        )
+        
         # Get all posts from user's channels and score them
         await _score_user_channel_posts(session, user_telegram_id, preference_vector)
         
@@ -110,10 +118,11 @@ async def predict(
         if not user:
             return {}
         
-        # Try to use cached preference vector first
-        preference_vector = user.preference_vector_cache
+        # Try to use cached preference vector first (from user_preference_vectors table)
+        pv_row = await UserPreferenceVectorRepository.get_by_user_id(session, user.id)
+        preference_vector = pv_row.preference_vector if pv_row else None
         
-        # If no cache or cache is stale, recalculate
+        # If no cache, recalculate
         if not preference_vector:
             # Get user's liked posts for preference vector
             liked_posts, disliked_posts = await _get_user_interaction_posts(session, user.id)
@@ -128,7 +137,7 @@ async def predict(
             
             # Cache the vector if computed
             if preference_vector:
-                await UserRepository.update_preference_vector(session, user.id, preference_vector)
+                await UserPreferenceVectorRepository.upsert(session, user.id, preference_vector)
                 await session.commit()
         
         if not preference_vector:
@@ -183,8 +192,9 @@ async def get_recommended_posts(
         if not user:
             return []
         
-        # Try to use cached preference vector first
-        preference_vector = user.preference_vector_cache
+        # Try to use cached preference vector first (from user_preference_vectors table)
+        pv_row = await UserPreferenceVectorRepository.get_by_user_id(session, user.id)
+        preference_vector = pv_row.preference_vector if pv_row else None
         
         # If no cache, try to compute from interactions
         if not preference_vector:
@@ -204,7 +214,7 @@ async def get_recommended_posts(
             
             # Cache if computed
             if preference_vector:
-                await UserRepository.update_preference_vector(session, user.id, preference_vector)
+                await UserPreferenceVectorRepository.upsert(session, user.id, preference_vector)
                 await session.commit()
         
         if not preference_vector:
@@ -216,58 +226,21 @@ async def get_recommended_posts(
             interactions = await InteractionRepository.get_by_user_id(session, user.id)
             exclude_ids = {i.post_id for i in interactions}
         
-        # Optimized search using clusters
-        from app.services import cluster_service
-        
-        # Get all posts with clusters
-        all_posts = await PostRepository.get_all(session)
-        post_ids = [p.id for p in all_posts]
-        
-        # Find similar clusters
-        cluster_centroids = await cluster_service.get_cluster_centroids(session, post_ids)
-        similar_clusters = await cluster_service.find_similar_clusters(
-            preference_vector,
-            cluster_centroids,
-            top_k=5,
-            similarity_threshold=settings.default_similarity_threshold
-        )
-        
-        # Get posts from similar clusters (pre-filter)
-        cluster_ids = [c[0] for c in similar_clusters]
-        filtered_posts = await cluster_service.get_posts_from_clusters(
-            session,
-            cluster_ids,
-            limit=(limit + len(exclude_ids)) * settings.cluster_search_multiplier
-        )
-        
-        filtered_post_ids = [p.id for p in filtered_posts if p.id not in exclude_ids]
-        
-        # If we have filtered posts from clusters, use them for search
-        # Otherwise fallback to full search
-        if filtered_post_ids:
-            search_limit = min(limit * settings.cluster_search_max_multiplier, len(filtered_post_ids))
-        else:
-            search_limit = limit + len(exclude_ids)
-        
-        # Search for similar posts (full search, then filter by cluster results)
+        # Direct Qdrant search (post-clusters removed; delivery is post-centric via taste clusters)
+        search_limit = limit + len(exclude_ids)
         results = await qdrant_service.search_similar_posts(
             query_vector=preference_vector,
             limit=search_limit,
             score_threshold=settings.default_score_threshold,
         )
         
-        # Filter results to only posts from similar clusters
-        if filtered_post_ids:
-            results = [r for r in results if r['id'] in filtered_post_ids]
-        
-        # Filter and return
         recommended = []
         for r in results:
             if r['id'] not in exclude_ids and len(recommended) < limit:
                 recommended.append({
                     'post_id': r['id'],
                     'score': r['score'],
-                    'payload': r['payload'],
+                    'payload': r.get('payload', {}),
                 })
         
         return recommended
@@ -411,4 +384,97 @@ async def _score_user_channel_posts(
 
 
 from app.services.utils import cosine_similarity as _cosine_similarity
+
+
+async def maybe_recalc_taste_after_interaction(
+    session: AsyncSession,
+    user_telegram_id: int,
+) -> bool:
+    """
+    After every 2 reactions (like/dislike), recalc user preference vector and assign to nearest cluster.
+    Returns True if recalculated.
+    """
+    user = await UserRepository.get_by_telegram_id(session, user_telegram_id)
+    if not user:
+        return False
+    interactions = await InteractionRepository.get_by_user_id(session, user.id)
+    count = len(interactions)
+    if count < 2 or count % 2 != 0:
+        return False
+    liked_posts, disliked_posts = await _get_user_interaction_posts(session, user.id)
+    if not liked_posts:
+        return False
+    all_posts = liked_posts + disliked_posts
+    await _ensure_post_embeddings(session, all_posts)
+    liked_embeddings = await _get_embeddings_for_posts([p.id for p in liked_posts])
+    disliked_embeddings = await _get_embeddings_for_posts([p.id for p in disliked_posts])
+    preference_vector = await qdrant_service.get_user_preference_vector(
+        liked_embeddings,
+        disliked_embeddings if disliked_embeddings else None,
+    )
+    if not preference_vector:
+        return False
+    await UserPreferenceVectorRepository.upsert(session, user.id, preference_vector)
+    from app.services import taste_cluster_service
+    await taste_cluster_service.assign_user_to_nearest_cluster(
+        session, user.id, preference_vector
+    )
+    await session.flush()
+    logger.info(f"Taste recalculated for user {user_telegram_id} after {count} interactions")
+    return True
+
+
+async def get_post_recipients(
+    session: AsyncSession,
+    post_id: int,
+    post_text: Optional[str] = None,
+) -> List[int]:
+    """
+    Post-centric delivery: return telegram_ids of users who should receive this post.
+    Users must be in a taste cluster matching the post embedding and have mailing_enabled for this channel.
+    """
+    post = await PostRepository.get_by_id(session, post_id)
+    if not post:
+        return []
+
+    # Get or create post embedding
+    existing = await qdrant_service.get_post_embeddings_batch([post_id])
+    if post_id in existing:
+        post_embedding = existing[post_id]
+    else:
+        if not post_text or not post_text.strip():
+            return []
+        channel = await ChannelRepository.get_by_id(session, post.channel_id)
+        channel_title = channel.title if channel else None
+        text = embedding_service.prepare_post_text(post_text, channel_title)
+        embeddings = await embedding_service.get_embeddings_batch([text])
+        if not embeddings or embeddings[0] is None:
+            return []
+        post_embedding = embeddings[0]
+        await qdrant_service.upsert_post_embeddings_batch([{
+            "id": post_id,
+            "vector": post_embedding,
+            "payload": {"channel_id": post.channel_id},
+        }])
+
+    from app.services import taste_cluster_service
+    cluster_ids = await taste_cluster_service.get_cluster_ids_matching_post(
+        session, post_embedding
+    )
+    if not cluster_ids:
+        return []
+
+    result = await session.execute(
+        select(User.telegram_id).join(
+            UserChannel,
+            (User.id == UserChannel.user_id)
+            & (UserChannel.channel_id == post.channel_id)
+            & (UserChannel.mailing_enabled == True),
+        ).where(
+            User.taste_cluster_id.in_(cluster_ids),
+            User.is_deleted == False,
+            User.status.in_([UserStatus.ACTIVE, UserStatus.TRAINED]),
+        ).distinct()
+    )
+    return [row[0] for row in result.all()]
 

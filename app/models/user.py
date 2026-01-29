@@ -1,10 +1,13 @@
 """User ORM model."""
 from datetime import datetime
-from typing import Optional, List
-from sqlalchemy import String, BigInteger, Boolean, DateTime, Enum, Index, JSON
+from typing import Optional, List, TYPE_CHECKING
+from sqlalchemy import String, BigInteger, Boolean, DateTime, Enum, Index, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 import enum
+
+if TYPE_CHECKING:
+    from app.models.taste_cluster import TasteCluster
 
 
 class UserStatus(str, enum.Enum):
@@ -32,14 +35,8 @@ class User(Base):
         default=UserStatus.NEW,
         nullable=False
     )
-    is_trained: Mapped[bool] = mapped_column(Boolean, default=False)
     bonus_channels_count: Mapped[int] = mapped_column(default=0)
-    initial_best_post_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     language: Mapped[str] = mapped_column(String(10), default="en_US")
-    
-    # ML preference vector cache (computed from user's liked/disliked posts)
-    preference_vector_cache: Mapped[Optional[List[float]]] = mapped_column(JSON, nullable=True)
-    preference_vector_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     
     last_activity_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), 
@@ -56,10 +53,23 @@ class User(Base):
     # Soft delete fields
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    taste_cluster_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("taste_clusters.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     
     # Relationships
+    taste_cluster: Mapped[Optional["TasteCluster"]] = relationship(
+        back_populates="users",
+        foreign_keys=[taste_cluster_id],
+    )
     channels: Mapped[List["UserChannel"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     interactions: Mapped[List["Interaction"]] = relationship(back_populates="user", cascade="all, delete-orphan")
+    preference_vector: Mapped[Optional["UserPreferenceVector"]] = relationship(  # noqa: F821
+        back_populates="user", uselist=False, cascade="all, delete-orphan"
+    )
     
     __table_args__ = (
         Index("idx_user_status", "status"),

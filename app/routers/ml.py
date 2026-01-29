@@ -1,5 +1,5 @@
 """ML endpoints for ML Service."""
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
@@ -8,6 +8,17 @@ from app.database import get_session
 from app.services import ml_service
 
 router = APIRouter(prefix="/ml", tags=["ml"])
+
+
+class PostRecipientsRequest(BaseModel):
+    """Request for post-centric delivery: who should receive this post."""
+    post_id: int
+    text: Optional[str] = None
+
+
+class PostRecipientsResponse(BaseModel):
+    """Telegram IDs of users to notify for this post (taste clusters + mailing_enabled)."""
+    telegram_ids: List[int]
 
 
 class TrainRequest(BaseModel):
@@ -119,6 +130,40 @@ async def get_recommendations(
             for r in recommendations
         ]
     )
+
+
+@router.post("/on-user-interaction")
+async def on_user_interaction(
+    request: TrainRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    After every 2 reactions (like/dislike), recalc user preference vector and assign to nearest cluster.
+    Called by API after create_interaction. Returns { recalculated: bool }.
+    """
+    recalculated = await ml_service.maybe_recalc_taste_after_interaction(
+        session, request.user_telegram_id
+    )
+    if recalculated:
+        await session.commit()
+    return {"recalculated": recalculated}
+
+
+@router.post("/post-recipients", response_model=PostRecipientsResponse)
+async def get_post_recipients_endpoint(
+    request: PostRecipientsRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Post-centric delivery: return telegram_ids of users who should receive this post.
+    Uses taste clusters and mailing_enabled for the post's channel.
+    """
+    telegram_ids = await ml_service.get_post_recipients(
+        session,
+        request.post_id,
+        post_text=request.text,
+    )
+    return PostRecipientsResponse(telegram_ids=telegram_ids)
 
 
 @router.get("/eligibility/{telegram_id}")

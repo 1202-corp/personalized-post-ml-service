@@ -4,6 +4,7 @@ ML Service - Real implementation using embeddings and Qdrant vector search.
 
 import logging
 import time
+import random
 from typing import List, Dict, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +15,8 @@ from app.config import get_settings
 from app.services import embedding_service, qdrant_service
 from app.repositories.user_repository import UserRepository
 from app.repositories.user_preference_vector_repository import UserPreferenceVectorRepository
+from app.repositories.user_channel_preference_vector_repository import UserChannelPreferenceVectorRepository
+from app.repositories.user_channel_taste_repository import UserChannelTasteRepository
 from app.repositories.post_repository import PostRepository
 from app.repositories.interaction_repository import InteractionRepository
 from app.repositories.user_channel_repository import UserChannelRepository
@@ -119,32 +122,35 @@ async def train_model(session: AsyncSession, user_telegram_id: int) -> tuple[boo
         return False, "Need at least 1 interaction to train", training_time
     
     try:
-        # Get user's interactions with posts
-        liked_posts, disliked_posts = await _get_user_interaction_posts(session, user.id)
-        
-        # Generate and store embeddings for all interacted posts
-        all_posts = liked_posts + disliked_posts
+        # Per-channel: group interactions by channel, compute vector per channel, assign to cluster per channel
+        by_channel = await _get_user_interaction_posts_by_channel(session, user.id)
+        all_posts = []
+        for liked, disliked in by_channel.values():
+            all_posts.extend(liked)
+            all_posts.extend(disliked)
         await _ensure_post_embeddings(session, all_posts)
-        
-        # Get embeddings for liked and disliked posts
-        liked_embeddings = await _get_embeddings_for_posts([p.id for p in liked_posts])
-        disliked_embeddings = await _get_embeddings_for_posts([p.id for p in disliked_posts])
-        
-        # Compute user preference vector
-        preference_vector = await qdrant_service.get_user_preference_vector(
-            liked_embeddings,
-            disliked_embeddings if disliked_embeddings else None
-        )
-        
-        if not preference_vector:
-            return False, "Could not compute preference vector", time.time() - start_time
-        
-        # Save preference vector to user cache
-        await UserRepository.update_preference_vector(session, user.id, preference_vector)
+
+        from app.services import taste_cluster_service
+        for channel_id, (liked_posts, disliked_posts) in by_channel.items():
+            if not liked_posts:
+                continue
+            liked_embeddings = await _get_embeddings_for_posts([p.id for p in liked_posts])
+            disliked_embeddings = await _get_embeddings_for_posts([p.id for p in disliked_posts])
+            preference_vector = await qdrant_service.get_user_preference_vector(
+                liked_embeddings,
+                disliked_embeddings if disliked_embeddings else None,
+            )
+            if not preference_vector:
+                continue
+            await UserChannelPreferenceVectorRepository.upsert(
+                session, user.id, channel_id, preference_vector
+            )
+            await taste_cluster_service.assign_user_to_nearest_cluster(
+                session, user.id, preference_vector, channel_id=channel_id
+            )
         await session.flush()
 
-        # Recalculate taste clusters (creates clusters when none, or N=1; assigns all users)
-        from app.services import taste_cluster_service
+        # Recalculate taste clusters per channel (so cluster centroids are up to date)
         await taste_cluster_service.recalculate_taste_clusters(session)
 
         # Feed scoring is done on the fly via predict() when get_best_posts is called; no Post.relevance_score write.
@@ -166,67 +172,49 @@ async def train_model(session: AsyncSession, user_telegram_id: int) -> tuple[boo
 async def predict(
     session: AsyncSession,
     user_telegram_id: int,
-    post_ids: List[int]
+    post_ids: List[int],
+    channel_id: Optional[int] = None,
 ) -> Dict[int, float]:
     """
     Get relevance predictions for specific posts.
-    Uses user's preference vector and post embeddings.
+    Uses user's preference vector per channel and post embeddings.
+    If channel_id is given, uses only that channel's vector; otherwise for each post uses post.channel_id.
     """
     try:
         user = await UserRepository.get_by_telegram_id(session, user_telegram_id)
         if not user:
             return {}
-        
-        # Try to use cached preference vector first (from user_preference_vectors table)
-        pv_row = await UserPreferenceVectorRepository.get_by_user_id(session, user.id)
-        preference_vector = pv_row.preference_vector if pv_row else None
-        
-        # If no cache, recalculate
-        if not preference_vector:
-            # Get user's liked posts for preference vector
-            liked_posts, disliked_posts = await _get_user_interaction_posts(session, user.id)
-            
-            liked_embeddings = await _get_embeddings_for_posts([p.id for p in liked_posts])
-            disliked_embeddings = await _get_embeddings_for_posts([p.id for p in disliked_posts])
-            
-            preference_vector = await qdrant_service.get_user_preference_vector(
-                liked_embeddings,
-                disliked_embeddings if disliked_embeddings else None
-            )
-            
-            # Cache the vector if computed
-            if preference_vector:
-                await UserPreferenceVectorRepository.upsert(session, user.id, preference_vector)
-                await session.commit()
-        
-        if not preference_vector:
-            # Fallback to neutral scores (cosine = 0.0 means orthogonal/neutral)
-            return {pid: 0.0 for pid in post_ids}
-        
-        # Get posts and ensure they have embeddings
+
         posts = []
         for post_id in post_ids:
             post = await PostRepository.get_by_id(session, post_id)
             if post:
                 posts.append(post)
-        
         await _ensure_post_embeddings(session, posts)
-        
-        # Calculate similarity scores
-        predictions = {}
         post_embeddings = await qdrant_service.get_post_embeddings_batch(post_ids)
-        
+
+        predictions = {}
         for post_id in post_ids:
-            if post_id in post_embeddings:
-                score = _cosine_similarity(preference_vector, post_embeddings[post_id])
-                # Use raw cosine similarity (range [-1, 1])
-                # 0.0 = orthogonal (neutral), >0.0 = similar, <0.0 = dissimilar
-                predictions[post_id] = round(score, 4)
-            else:
-                predictions[post_id] = 0.0  # Neutral (orthogonal) when no embedding
+            if post_id not in post_embeddings:
+                predictions[post_id] = 0.0
+                continue
+            post = next((p for p in posts if p.id == post_id), None)
+            cid = channel_id if channel_id is not None else (post.channel_id if post else None)
+            if cid is None:
+                predictions[post_id] = 0.0
+                continue
+            pv_row = await UserChannelPreferenceVectorRepository.get_by_user_and_channel(
+                session, user.id, cid
+            )
+            preference_vector = pv_row.preference_vector if pv_row else None
+            if not preference_vector:
+                predictions[post_id] = 0.0
+                continue
+            score = _cosine_similarity(preference_vector, post_embeddings[post_id])
+            predictions[post_id] = round(score, 4)
 
         return predictions
-        
+
     except Exception as e:
         await session.rollback()
         logger.error(f"Prediction failed: {e}", exc_info=True)
@@ -247,31 +235,27 @@ async def get_recommended_posts(
         if not user:
             return []
         
-        # Try to use cached preference vector first (from user_preference_vectors table)
-        pv_row = await UserPreferenceVectorRepository.get_by_user_id(session, user.id)
-        preference_vector = pv_row.preference_vector if pv_row else None
-        
-        # If no cache, try to compute from interactions
-        if not preference_vector:
-            liked_posts, disliked_posts = await _get_user_interaction_posts(session, user.id)
-            
-            if not liked_posts:
-                # No liked posts yet - return recent posts
-                return []
-            
-            liked_embeddings = await _get_embeddings_for_posts([p.id for p in liked_posts])
-            disliked_embeddings = await _get_embeddings_for_posts([p.id for p in disliked_posts])
-            
-            preference_vector = await qdrant_service.get_user_preference_vector(
-                liked_embeddings,
-                disliked_embeddings if disliked_embeddings else None
+        # Prefer per-channel vectors: average across user's channels for feed search
+        from app.models.user_channel_preference_vector import UserChannelPreferenceVector
+        result = await session.execute(
+            select(UserChannelPreferenceVector.preference_vector).where(
+                UserChannelPreferenceVector.user_id == user.id,
+                UserChannelPreferenceVector.preference_vector.isnot(None),
             )
-            
-            # Cache if computed
-            if preference_vector:
-                await UserPreferenceVectorRepository.upsert(session, user.id, preference_vector)
-                await session.commit()
-        
+        )
+        channel_vectors = [row[0] for row in result.all() if row[0] and isinstance(row[0], list) and len(row[0]) > 0]
+        if channel_vectors:
+            dim = len(channel_vectors[0])
+            avg = [0.0] * dim
+            for v in channel_vectors:
+                for i in range(dim):
+                    avg[i] += v[i]
+            n = len(channel_vectors)
+            avg = [x / n for x in avg]
+            mag = sum(x * x for x in avg) ** 0.5
+            preference_vector = [x / mag for x in avg] if mag > 0 else None
+        else:
+            preference_vector = None
         if not preference_vector:
             return []
         
@@ -352,6 +336,24 @@ async def _get_user_interaction_posts(
             disliked_posts.append(post)
     
     return liked_posts, disliked_posts
+
+
+async def _get_user_interaction_posts_by_channel(
+    session: AsyncSession, user_id: int
+) -> Dict[int, tuple[List[Post], List[Post]]]:
+    """Get user's liked and disliked posts grouped by channel_id. Returns {channel_id: (liked_posts, disliked_posts)}."""
+    liked_posts, disliked_posts = await _get_user_interaction_posts(session, user_id)
+    by_channel: Dict[int, tuple[List[Post], List[Post]]] = {}
+    for post in liked_posts + disliked_posts:
+        cid = post.channel_id
+        if cid not in by_channel:
+            by_channel[cid] = ([], [])
+        liked, disliked = by_channel[cid]
+        if post in liked_posts:
+            liked.append(post)
+        else:
+            disliked.append(post)
+    return by_channel
 
 
 async def _ensure_post_embeddings(session: AsyncSession, posts: List[Post]) -> None:
@@ -437,7 +439,7 @@ async def maybe_recalc_taste_after_interaction(
     user_telegram_id: int,
 ) -> bool:
     """
-    After every 2 reactions (like/dislike), recalc user preference vector and assign to nearest cluster.
+    After every 2 reactions (like/dislike), recalc user preference vector per channel and assign to nearest cluster per channel.
     Returns True if recalculated.
     """
     user = await UserRepository.get_by_telegram_id(session, user_telegram_id)
@@ -447,27 +449,37 @@ async def maybe_recalc_taste_after_interaction(
     count = len(interactions)
     if count < 2 or count % 2 != 0:
         return False
-    liked_posts, disliked_posts = await _get_user_interaction_posts(session, user.id)
-    if not liked_posts:
-        return False
-    all_posts = liked_posts + disliked_posts
+    by_channel = await _get_user_interaction_posts_by_channel(session, user.id)
+    all_posts = []
+    for liked, disliked in by_channel.values():
+        all_posts.extend(liked)
+        all_posts.extend(disliked)
     await _ensure_post_embeddings(session, all_posts)
-    liked_embeddings = await _get_embeddings_for_posts([p.id for p in liked_posts])
-    disliked_embeddings = await _get_embeddings_for_posts([p.id for p in disliked_posts])
-    preference_vector = await qdrant_service.get_user_preference_vector(
-        liked_embeddings,
-        disliked_embeddings if disliked_embeddings else None,
-    )
-    if not preference_vector:
-        return False
-    await UserPreferenceVectorRepository.upsert(session, user.id, preference_vector)
+
     from app.services import taste_cluster_service
-    await taste_cluster_service.assign_user_to_nearest_cluster(
-        session, user.id, preference_vector
-    )
+    recalculated = False
+    for channel_id, (liked_posts, disliked_posts) in by_channel.items():
+        if not liked_posts:
+            continue
+        liked_embeddings = await _get_embeddings_for_posts([p.id for p in liked_posts])
+        disliked_embeddings = await _get_embeddings_for_posts([p.id for p in disliked_posts])
+        preference_vector = await qdrant_service.get_user_preference_vector(
+            liked_embeddings,
+            disliked_embeddings if disliked_embeddings else None,
+        )
+        if not preference_vector:
+            continue
+        await UserChannelPreferenceVectorRepository.upsert(
+            session, user.id, channel_id, preference_vector
+        )
+        await taste_cluster_service.assign_user_to_nearest_cluster(
+            session, user.id, preference_vector, channel_id=channel_id
+        )
+        recalculated = True
     await session.flush()
-    logger.info(f"Taste recalculated for user {user_telegram_id} after {count} interactions")
-    return True
+    if recalculated:
+        logger.info(f"Taste recalculated for user {user_telegram_id} after {count} interactions (per channel)")
+    return recalculated
 
 
 async def get_post_recipients(
@@ -525,9 +537,10 @@ async def get_post_recipients(
     # но predict score может быть высоким. Поэтому используем более мягкий порог для кластеров
     # или проверяем все кластеры с пользователями через predict score
     similarity_threshold = settings.taste_cluster_similarity_threshold
-    clusters = await TasteClusterRepository.get_all(session)
+    channel_id = post.channel_id
+    clusters = await TasteClusterRepository.get_all(session, channel_id=channel_id)
     
-    logger.info(f"[POST_RECIPIENTS] post_id={post_id}: найдено кластеров в БД: {len(clusters)}, порог similarity: {similarity_threshold}")
+    logger.info(f"[POST_RECIPIENTS] post_id={post_id}: channel_id={channel_id}, найдено кластеров в БД: {len(clusters)}, порог similarity: {similarity_threshold}")
     
     # Собираем все кластеры с их scores (даже если они ниже порога)
     # Predict score будет финальным фильтром
@@ -550,14 +563,42 @@ async def get_post_recipients(
         logger.info(f"[POST_RECIPIENTS] post_id={post_id}: все кластеры и их cosine scores: {scores_info}")
     
     if not cluster_ids_to_check:
-        logger.info(f"[POST_RECIPIENTS] post_id={post_id}: нет кластеров для проверки (все кластеры имеют cosine < 0.26)")
-        return []
+        # Нет кластеров выше мягкого порога 0.26. Однако есть идея «мутации»:
+        # с небольшим шансом (например, 20%) всё же отправлять пост,
+        # если он хоть как‑то похож на кластер (cosine > 0).
+        positive_clusters = [c for c in all_cluster_scores if c[1] > 0.0]
+        if not positive_clusters:
+            logger.info(f"[POST_RECIPIENTS] post_id={post_id}: нет кластеров даже с cosine>0, ничего не отправляем")
+            return []
+        
+        mutation_prob = 0.20
+        roll = random.random()
+        if roll >= mutation_prob:
+            logger.info(
+                f"[POST_RECIPIENTS] post_id={post_id}: все кластеры имеют cosine < 0.26, "
+                f"cosine>0 есть, но мутация не сработала (roll={roll:.3f} >= {mutation_prob})"
+            )
+            return []
+
+        # Мутация сработала: выбираем все кластеры с cosine>0 и шлём пост всем их пользователям
+        soft_cluster_ids = [cid for cid, cos, _ in positive_clusters]
+        logger.info(
+            f"[POST_RECIPIENTS] post_id={post_id}: МУТАЦИЯ АКТИВНА (p={mutation_prob}), "
+            f"рассылаем пост кластерам с cosine>0: {soft_cluster_ids}"
+        )
+        cluster_ids_to_check = soft_cluster_ids
     
     # Логирование: кластеры, которые будем проверять
     matching_info = ", ".join([f"cluster_{cid}" for cid in cluster_ids_to_check])
     logger.info(f"[POST_RECIPIENTS] post_id={post_id}: проверяем кластеры (cosine >= 0.26): {matching_info}")
 
-    # Exclude users who already interacted with this post (like/dislike/skip)
+    # Candidates: users in these clusters for this channel (UserChannelTaste) + mailing_enabled + not interacted with this post
+    candidate_user_ids = await UserChannelTasteRepository.get_user_ids_in_clusters(
+        session, channel_id, cluster_ids_to_check
+    )
+    if not candidate_user_ids:
+        logger.info(f"[POST_RECIPIENTS] post_id={post_id}: нет кандидатов после фильтрации по clusters (channel_id={channel_id})")
+        return []
     result = await session.execute(
         select(User.telegram_id, User.id)
         .join(
@@ -571,10 +612,10 @@ async def get_post_recipients(
             (User.id == Interaction.user_id) & (Interaction.post_id == post_id)
         )
         .where(
-            User.taste_cluster_id.in_(cluster_ids_to_check),
+            User.id.in_(candidate_user_ids),
             User.is_deleted == False,
             User.status.in_([UserStatus.ACTIVE, UserStatus.TRAINED]),
-            Interaction.id.is_(None),  # No interaction exists for this post
+            Interaction.id.is_(None),
         )
         .distinct()
     )
@@ -596,10 +637,12 @@ async def get_post_recipients(
     user_ids_by_telegram = {tg_id: user_id for tg_id, user_id in candidate_users}
     user_scores = {}
     
-    # Check predict score for each user (filters out posts that don't match user preference well)
+    # Check predict score for each user (per-channel vector; filters out posts that don't match user taste for this channel)
     for tg_id, user_id in user_ids_by_telegram.items():
-        user_predictions = await predict(session, tg_id, [post_id])
-        score = user_predictions.get(post_id, 0.0)  # 0.0 = neutral (orthogonal) when no prediction
+        user_predictions = await predict(
+            session, tg_id, [post_id], channel_id=channel_id
+        )
+        score = user_predictions.get(post_id, 0.0)
         user_scores[tg_id] = score
         if score >= predict_threshold:
             recipients.append(tg_id)

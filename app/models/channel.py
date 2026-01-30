@@ -1,9 +1,12 @@
 """Channel ORM model."""
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, TYPE_CHECKING
 from sqlalchemy import String, BigInteger, Boolean, DateTime, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
+
+if TYPE_CHECKING:
+    from app.models.taste_cluster import TasteCluster
 
 
 class Channel(Base):
@@ -31,4 +34,7 @@ class Channel(Base):
     # Relationships
     posts: Mapped[List["Post"]] = relationship(back_populates="channel", cascade="all, delete-orphan")
     user_channels: Mapped[List["UserChannel"]] = relationship(back_populates="channel", cascade="all, delete-orphan")
+    taste_clusters: Mapped[List["TasteCluster"]] = relationship(
+        back_populates="channel", cascade="all, delete-orphan"
+    )
 

@@ -53,7 +53,7 @@ class Settings(BaseSettings):
 
     # Qdrant search settings
     dislike_weight: float = 0.3  # Weight for dislikes in user preference vector calculation
-    
+
     # LLM Reranker settings
     llm_timeout: float = 30.0  # HTTP timeout for LLM reranker requests (seconds)
     llm_temperature: float = 0.3  # Temperature for LLM reranker

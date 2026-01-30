@@ -20,6 +20,8 @@ from qdrant_client.http import models
 # Импорты моделей
 from app.models.interaction import Interaction
 from app.models.user_preference_vector import UserPreferenceVector
+from app.models.user_channel_preference_vector import UserChannelPreferenceVector
+from app.models.user_channel_taste import UserChannelTaste
 from app.models.taste_cluster import TasteCluster
 from app.models.user import User
 from app.models.channel import Channel
@@ -43,6 +45,12 @@ async def clear_database():
         # Удаляем все данные из всех таблиц (в правильном порядке из-за foreign keys)
         await session.execute(delete(Interaction))
         print("  ✓ Interactions удалены")
+        
+        await session.execute(delete(UserChannelTaste))
+        print("  ✓ User channel tastes удалены")
+        
+        await session.execute(delete(UserChannelPreferenceVector))
+        print("  ✓ User channel preference vectors удалены")
         
         await session.execute(delete(UserPreferenceVector))
         print("  ✓ User preference vectors удалены")

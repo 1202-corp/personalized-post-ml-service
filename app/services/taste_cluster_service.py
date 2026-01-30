@@ -70,13 +70,21 @@ async def recalculate_taste_clusters(session: AsyncSession) -> Dict[str, int]:
 
     users_with_vectors = await get_users_with_preference_vectors(session)
     N = len(users_with_vectors)
-    if N < 2:
-        logger.warning("Not enough users with preference vectors for taste clustering")
-        return {
-            "status": "insufficient_users",
-            "total_users": N,
-            "clusters_created": 0,
-        }
+    if N < 1:
+        return {"status": "no_users", "total_users": 0, "clusters_created": 0}
+
+    # Single user: create one cluster with their vector as centroid so they get assigned
+    if N == 1:
+        user, vec = users_with_vectors[0]
+        await TasteClusterRepository.delete_all(session)
+        user.taste_cluster_id = None
+        await session.flush()
+        cluster = await TasteClusterRepository.create(session, centroid=vec, user_count=1)
+        user.taste_cluster_id = cluster.id
+        cluster.user_count = 1
+        await session.flush()
+        logger.info("Taste clustering: 1 user -> 1 cluster")
+        return {"status": "success", "total_users": 1, "clusters_created": 1, "max_cluster_size": 1}
 
     max_size = max(1, math.ceil(N * settings.max_cluster_size_ratio))
     K = min(math.ceil(N / max_size), N)  # at most N clusters; with small N, max_size=1 => one cluster per user

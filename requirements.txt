@@ -6,6 +6,7 @@ pydantic==2.5.3
 pydantic-settings==2.1.0
 httpx==0.26.0
 qdrant-client==1.7.0
+redis==5.0.1
 scikit-learn==1.4.0
 numpy==1.26.3
 

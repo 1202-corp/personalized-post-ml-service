@@ -1,7 +1,7 @@
 """Post ORM model."""
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy import BigInteger, Text, String, Boolean, ForeignKey, DateTime, Index
+from sqlalchemy import BigInteger, String, Boolean, ForeignKey, DateTime, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -14,7 +14,7 @@ class Post(Base):
     channel_id: Mapped[int] = mapped_column(ForeignKey("channels.id", ondelete="CASCADE"), nullable=False)
     telegram_message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     
-    text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Note: text is stored in Redis (API cache), not in DB; use empty string when building embeddings until we fetch from API
     media_type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     media_file_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     

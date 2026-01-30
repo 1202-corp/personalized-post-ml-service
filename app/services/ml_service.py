@@ -200,8 +200,8 @@ async def predict(
                 await session.commit()
         
         if not preference_vector:
-            # Fallback to neutral scores
-            return {pid: 0.5 for pid in post_ids}
+            # Fallback to neutral scores (cosine = 0.0 means orthogonal/neutral)
+            return {pid: 0.0 for pid in post_ids}
         
         # Get posts and ensure they have embeddings
         posts = []
@@ -219,18 +219,18 @@ async def predict(
         for post_id in post_ids:
             if post_id in post_embeddings:
                 score = _cosine_similarity(preference_vector, post_embeddings[post_id])
-                # Normalize to 0-1 range (cosine similarity is -1 to 1)
-                score = (score + 1) / 2
+                # Use raw cosine similarity (range [-1, 1])
+                # 0.0 = orthogonal (neutral), >0.0 = similar, <0.0 = dissimilar
                 predictions[post_id] = round(score, 4)
             else:
-                predictions[post_id] = 0.5
+                predictions[post_id] = 0.0  # Neutral (orthogonal) when no embedding
 
         return predictions
         
     except Exception as e:
         await session.rollback()
         logger.error(f"Prediction failed: {e}", exc_info=True)
-        return {pid: 0.5 for pid in post_ids}
+        return {pid: 0.0 for pid in post_ids}
 
 
 async def get_recommended_posts(
@@ -479,22 +479,34 @@ async def get_post_recipients(
     Post-centric delivery: return telegram_ids of users who should receive this post.
     Users must be in a taste cluster matching the post embedding and have mailing_enabled for this channel.
     """
+    from app.services import taste_cluster_service
+    from app.models.interaction import Interaction
+    from app.services.utils import cosine_similarity
+    from app.repositories.taste_cluster_repository import TasteClusterRepository
+    
+    logger.info(f"[POST_RECIPIENTS] === НАЧАЛО обработки post_id={post_id}, post_text={post_text[:100] if post_text else None!r}")
+    
     post = await PostRepository.get_by_id(session, post_id)
     if not post:
+        logger.warning(f"[POST_RECIPIENTS] post_id={post_id}: пост не найден в БД")
         return []
 
     # Get or create post embedding
     existing = await qdrant_service.get_post_embeddings_batch([post_id])
     if post_id in existing:
         post_embedding = existing[post_id]
+        logger.info(f"[POST_RECIPIENTS] post_id={post_id}: эмбеддинг найден в Qdrant")
     else:
         if not post_text or not post_text.strip():
+            logger.warning(f"[POST_RECIPIENTS] post_id={post_id}: post_text отсутствует или пустой, невозможно создать эмбеддинг")
             return []
+        logger.info(f"[POST_RECIPIENTS] post_id={post_id}: создаю новый эмбеддинг из текста")
         channel = await ChannelRepository.get_by_id(session, post.channel_id)
         channel_title = channel.title if channel else None
         text = embedding_service.prepare_post_text(post_text, channel_title)
         embeddings = await embedding_service.get_embeddings_batch([text])
         if not embeddings or embeddings[0] is None:
+            logger.error(f"[POST_RECIPIENTS] post_id={post_id}: не удалось получить эмбеддинг от embedding_service")
             return []
         post_embedding = embeddings[0]
         await qdrant_service.upsert_post_embeddings_batch([{
@@ -502,25 +514,109 @@ async def get_post_recipients(
             "vector": post_embedding,
             "payload": {"channel_id": post.channel_id},
         }])
+        logger.info(f"[POST_RECIPIENTS] post_id={post_id}: эмбеддинг создан и сохранен в Qdrant")
 
-    from app.services import taste_cluster_service
-    cluster_ids = await taste_cluster_service.get_cluster_ids_matching_post(
-        session, post_embedding
-    )
-    if not cluster_ids:
+    # Логирование: текст поста
+    display_text = (post_text or "").strip()[:200]  # Первые 200 символов
+    logger.info(f"[POST_RECIPIENTS] post_id={post_id}, text={display_text!r}")
+
+    # Получаем все кластеры с их cosine scores
+    # Для коротких текстов cosine similarity с кластером может быть низкой,
+    # но predict score может быть высоким. Поэтому используем более мягкий порог для кластеров
+    # или проверяем все кластеры с пользователями через predict score
+    similarity_threshold = settings.taste_cluster_similarity_threshold
+    clusters = await TasteClusterRepository.get_all(session)
+    
+    logger.info(f"[POST_RECIPIENTS] post_id={post_id}: найдено кластеров в БД: {len(clusters)}, порог similarity: {similarity_threshold}")
+    
+    # Собираем все кластеры с их scores (даже если они ниже порога)
+    # Predict score будет финальным фильтром
+    all_cluster_scores = []
+    cluster_ids_to_check = []
+    for c in clusters:
+        if not c.centroid or len(c.centroid) != len(post_embedding):
+            logger.debug(f"[POST_RECIPIENTS] post_id={post_id}: кластер {c.id} пропущен (нет centroid или размер не совпадает: {len(c.centroid) if c.centroid else 0} vs {len(post_embedding)})")
+            continue
+        cosine = cosine_similarity(post_embedding, c.centroid)
+        all_cluster_scores.append((c.id, cosine, c.user_count))
+        # Используем более мягкий порог для кластеров: 0.26 вместо 0.5
+        # Финальная фильтрация будет по predict score
+        if cosine >= 0.26:  # Мягкий порог для кластеров
+            cluster_ids_to_check.append(c.id)
+    
+    # Логируем все scores для отладки
+    if all_cluster_scores:
+        scores_info = ", ".join([f"cluster_{cid}(cosine={cos:.4f}, users={ucnt})" for cid, cos, ucnt in all_cluster_scores])
+        logger.info(f"[POST_RECIPIENTS] post_id={post_id}: все кластеры и их cosine scores: {scores_info}")
+    
+    if not cluster_ids_to_check:
+        logger.info(f"[POST_RECIPIENTS] post_id={post_id}: нет кластеров для проверки (все кластеры имеют cosine < 0.26)")
         return []
+    
+    # Логирование: кластеры, которые будем проверять
+    matching_info = ", ".join([f"cluster_{cid}" for cid in cluster_ids_to_check])
+    logger.info(f"[POST_RECIPIENTS] post_id={post_id}: проверяем кластеры (cosine >= 0.26): {matching_info}")
 
+    # Exclude users who already interacted with this post (like/dislike/skip)
     result = await session.execute(
-        select(User.telegram_id).join(
+        select(User.telegram_id, User.id)
+        .join(
             UserChannel,
             (User.id == UserChannel.user_id)
             & (UserChannel.channel_id == post.channel_id)
             & (UserChannel.mailing_enabled == True),
-        ).where(
-            User.taste_cluster_id.in_(cluster_ids),
+        )
+        .outerjoin(
+            Interaction,
+            (User.id == Interaction.user_id) & (Interaction.post_id == post_id)
+        )
+        .where(
+            User.taste_cluster_id.in_(cluster_ids_to_check),
             User.is_deleted == False,
             User.status.in_([UserStatus.ACTIVE, UserStatus.TRAINED]),
-        ).distinct()
+            Interaction.id.is_(None),  # No interaction exists for this post
+        )
+        .distinct()
     )
-    return [row[0] for row in result.all()]
+    candidate_users = result.all()
+    if not candidate_users:
+        logger.info(f"[POST_RECIPIENTS] post_id={post_id}: нет кандидатов после фильтрации по interactions")
+        return []
+    
+    # Логирование: пользователи в кластерах (до фильтрации по predict)
+    candidate_tg_ids = [tg_id for tg_id, _ in candidate_users]
+    logger.info(f"[POST_RECIPIENTS] post_id={post_id}: кандидаты из кластеров (до predict): {len(candidate_tg_ids)} пользователей: {candidate_tg_ids[:10]}{'...' if len(candidate_tg_ids) > 10 else ''}")
+    
+    # Additional filter: use predict score to ensure post is relevant for user
+    # This catches cases where taste cluster match is too broad (e.g. similar short phrases)
+    # Even if cluster matches, we require predict(user, post) >= threshold
+    predict_threshold = settings.post_recipient_predict_threshold
+    
+    recipients = []
+    user_ids_by_telegram = {tg_id: user_id for tg_id, user_id in candidate_users}
+    user_scores = {}
+    
+    # Check predict score for each user (filters out posts that don't match user preference well)
+    for tg_id, user_id in user_ids_by_telegram.items():
+        user_predictions = await predict(session, tg_id, [post_id])
+        score = user_predictions.get(post_id, 0.0)  # 0.0 = neutral (orthogonal) when no prediction
+        user_scores[tg_id] = score
+        if score >= predict_threshold:
+            recipients.append(tg_id)
+    
+    # Логирование: финальный список получателей с их predict scores
+    if recipients:
+        recipient_info = ", ".join([f"user_{tg_id}(predict={user_scores[tg_id]:.4f})" for tg_id in recipients[:10]])
+        if len(recipients) > 10:
+            recipient_info += f", ... (всего {len(recipients)})"
+        logger.info(f"[POST_RECIPIENTS] post_id={post_id}: финальные получатели (после predict>={predict_threshold}): {recipient_info}")
+    else:
+        logger.info(f"[POST_RECIPIENTS] post_id={post_id}: нет получателей после фильтрации по predict (порог {predict_threshold})")
+        # Логируем несколько примеров низких scores
+        if user_scores:
+            low_scores = sorted(user_scores.items(), key=lambda x: x[1])[:5]
+            low_info = ", ".join([f"user_{tg_id}({score:.4f})" for tg_id, score in low_scores])
+            logger.info(f"[POST_RECIPIENTS] post_id={post_id}: примеры низких predict scores: {low_info}")
+    
+    return recipients
 

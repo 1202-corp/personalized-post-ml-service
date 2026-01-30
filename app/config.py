@@ -9,6 +9,12 @@ class Settings(BaseSettings):
     # PostgreSQL database (read-only access to main DB)
     database_url: str = "postgresql+asyncpg://ppp_user:ppp_secret@postgres:5432/ppp_db"
     
+    # Redis (same as API) — for reading post text when building embeddings
+    redis_url: str = "redis://redis:6379/0"
+    
+    # Core API URL — for fetching post content when not in Redis (API may fetch from user-bot)
+    core_api_url: str = "http://api:8000"
+    
     # App settings
     debug: bool = False
     
@@ -41,6 +47,7 @@ class Settings(BaseSettings):
     # Taste clusters (user clustering by preference vector)
     max_cluster_size_ratio: float = 0.017  # Max 1.7% of users per taste cluster (variant A)
     taste_cluster_similarity_threshold: float = 0.5  # Min similarity for post-to-cluster match
+    post_recipient_predict_threshold: float = 0.3  # Min cosine similarity for post delivery (raw cosine, not normalized). 0.3 = lower threshold for short texts
     kmeans_random_state: int = 42  # Random state for K-Means (for reproducibility)
     kmeans_n_init: int = 10  # Number of K-Means initialization attempts
 

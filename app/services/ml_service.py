@@ -7,6 +7,8 @@ import time
 from typing import List, Dict, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+import redis.asyncio as aioredis
+import httpx
 
 from app.config import get_settings
 from app.services import embedding_service, qdrant_service
@@ -26,7 +28,66 @@ from app.logging_config import get_logger
 logger = get_logger(__name__)
 settings = get_settings()
 
-# Minimum interactions required for training - now from settings
+_redis_client: Optional[aioredis.Redis] = None
+
+
+async def _get_redis() -> aioredis.Redis:
+    """Lazy Redis client (same URL as API, read-only for post content)."""
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = aioredis.from_url(
+            settings.redis_url,
+            decode_responses=False,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+        )
+    return _redis_client
+
+
+async def get_post_texts_from_redis(post_ids: List[int]) -> Dict[int, str]:
+    """
+    Fetch post text for given post IDs from Redis (same cache as API).
+    Key format: post:{post_id}:content, hash field 'text'.
+    Returns dict post_id -> text (empty string if missing).
+    """
+    if not post_ids:
+        return {}
+    try:
+        redis_client = await _get_redis()
+        pipe = redis_client.pipeline()
+        for pid in post_ids:
+            pipe.hget(f"post:{pid}:content", "text")
+        raw = await pipe.execute()
+        result = {}
+        for pid, val in zip(post_ids, raw):
+            if val is not None:
+                try:
+                    result[pid] = val.decode("utf-8") if isinstance(val, bytes) else str(val)
+                except Exception:
+                    result[pid] = ""
+            else:
+                result[pid] = ""
+        return result
+    except Exception as e:
+        logger.warning(f"Failed to get post texts from Redis: {e}")
+        return {pid: "" for pid in post_ids}
+
+
+async def fetch_post_text_from_api(post_id: int) -> str:
+    """
+    Fetch post content from API (API will load from Redis or fetch from user-bot).
+    Returns text or empty string on failure.
+    """
+    try:
+        base = settings.core_api_url.rstrip("/")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(f"{base}/api/v1/posts/{post_id}/content")
+            if resp.status_code == 200:
+                data = resp.json()
+                return (data.get("text") or "").strip()
+    except Exception as e:
+        logger.debug(f"API fetch post content failed (post_id={post_id}): {e}")
+    return ""
 
 
 async def train_model(session: AsyncSession, user_telegram_id: int) -> tuple[bool, str, float]:
@@ -80,15 +141,13 @@ async def train_model(session: AsyncSession, user_telegram_id: int) -> tuple[boo
         
         # Save preference vector to user cache
         await UserRepository.update_preference_vector(session, user.id, preference_vector)
-        
-        # Assign user to nearest taste cluster (for post-centric delivery)
+        await session.flush()
+
+        # Recalculate taste clusters (creates clusters when none, or N=1; assigns all users)
         from app.services import taste_cluster_service
-        await taste_cluster_service.assign_user_to_nearest_cluster(
-            session, user.id, preference_vector
-        )
-        
-        # Get all posts from user's channels and score them
-        await _score_user_channel_posts(session, user_telegram_id, preference_vector)
+        await taste_cluster_service.recalculate_taste_clusters(session)
+
+        # Feed scoring is done on the fly via predict() when get_best_posts is called; no Post.relevance_score write.
         
         # Commit all changes
         await session.commit()
@@ -163,13 +222,9 @@ async def predict(
                 # Normalize to 0-1 range (cosine similarity is -1 to 1)
                 score = (score + 1) / 2
                 predictions[post_id] = round(score, 4)
-                
-                # Update post relevance in DB
-                await PostRepository.update_relevance_score(session, post_id, score)
             else:
                 predictions[post_id] = 0.5
-        
-        await session.commit()
+
         return predictions
         
     except Exception as e:
@@ -317,25 +372,46 @@ async def _ensure_post_embeddings(session: AsyncSession, posts: List[Post]) -> N
             channel = await ChannelRepository.get_by_id(session, post.channel_id)
             channel_cache[post.channel_id] = channel.title if channel else None
     
-    # Prepare texts for embedding
+    # Fetch post text: first Redis, then API (API may fetch from user-bot)
+    post_texts = await get_post_texts_from_redis([p.id for p in posts_needing_embeddings])
+    missing = [p for p in posts_needing_embeddings if not (post_texts.get(p.id) or "").strip()]
+    for p in missing:
+        text = await fetch_post_text_from_api(p.id)
+        if text:
+            post_texts[p.id] = text
+    
+    # Never send posts without text to embedding — only posts with text
+    posts_with_text = [p for p in posts_needing_embeddings if (post_texts.get(p.id) or "").strip()]
+    if not posts_with_text:
+        logger.info("No posts with text to embed; skipping embedding step")
+        return
+    skipped = len(posts_needing_embeddings) - len(posts_with_text)
+    if skipped:
+        logger.info(f"Skipped {skipped} post(s) without text (no embedding)")
+    
+    # Prepare texts for embedding (post text + channel context)
     texts = [
-        embedding_service.prepare_post_text(p.text or "", channel_cache.get(p.channel_id))
-        for p in posts_needing_embeddings
+        embedding_service.prepare_post_text(
+            (post_texts.get(p.id) or "").strip(),
+            channel_cache.get(p.channel_id)
+        )
+        for p in posts_with_text
     ]
     
     # Get embeddings
     embeddings = await embedding_service.get_embeddings_batch(texts)
     
-    # Store in Qdrant
+    # Store in Qdrant (text_preview for search/debug)
     points = []
-    for post, emb in zip(posts_needing_embeddings, embeddings):
+    for post, emb in zip(posts_with_text, embeddings):
         if emb:
+            raw_text = (post_texts.get(post.id) or "").strip()
             points.append({
                 'id': post.id,
                 'vector': emb,
                 'payload': {
                     'channel_id': post.channel_id,
-                    'text_preview': (post.text or "")[:200],
+                    'text_preview': raw_text[:200],
                 }
             })
     
@@ -351,36 +427,6 @@ async def _get_embeddings_for_posts(post_ids: List[int]) -> List[List[float]]:
     
     embeddings_dict = await qdrant_service.get_post_embeddings_batch(post_ids)
     return [embeddings_dict[pid] for pid in post_ids if pid in embeddings_dict]
-
-
-async def _score_user_channel_posts(
-    session: AsyncSession,
-    user_telegram_id: int,
-    preference_vector: List[float]
-) -> None:
-    """Score all posts in user's channels based on preference vector."""
-    user = await UserRepository.get_by_telegram_id(session, user_telegram_id)
-    if not user:
-        return
-    
-    user_channels = await UserChannelRepository.get_by_user_id(session, user.id)
-    channel_ids = [uc.channel_id for uc in user_channels]
-    
-    for channel_id in channel_ids:
-        posts = await PostRepository.get_all_by_channel(session, channel_id)
-        
-        # Ensure embeddings exist
-        await _ensure_post_embeddings(session, posts)
-        
-        # Get embeddings and calculate scores
-        post_embeddings = await qdrant_service.get_post_embeddings_batch([p.id for p in posts])
-        
-        for post in posts:
-            if post.id in post_embeddings:
-                score = _cosine_similarity(preference_vector, post_embeddings[post.id])
-                # Normalize to 0-1 range
-                score = (score + 1) / 2
-                await PostRepository.update_relevance_score(session, post.id, round(score, 4))
 
 
 from app.services.utils import cosine_similarity as _cosine_similarity

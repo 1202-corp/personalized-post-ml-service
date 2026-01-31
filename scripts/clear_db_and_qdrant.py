@@ -4,22 +4,20 @@
 
 Очищает:
 - Interactions (все взаимодействия пользователей)
-- User preference vectors (векторы предпочтений)
+- User channel preference vectors и user channel tastes
 - Taste clusters (кластеры вкусов)
 - Qdrant collection (эмбеддинги постов)
-- Сбрасывает taste_cluster_id у пользователей
 """
 
 import asyncio
 import sys
-from sqlalchemy import delete, update
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 
 # Импорты моделей
 from app.models.interaction import Interaction
-from app.models.user_preference_vector import UserPreferenceVector
 from app.models.user_channel_preference_vector import UserChannelPreferenceVector
 from app.models.user_channel_taste import UserChannelTaste
 from app.models.taste_cluster import TasteCluster
@@ -51,10 +49,7 @@ async def clear_database():
         
         await session.execute(delete(UserChannelPreferenceVector))
         print("  ✓ User channel preference vectors удалены")
-        
-        await session.execute(delete(UserPreferenceVector))
-        print("  ✓ User preference vectors удалены")
-        
+
         await session.execute(delete(UserChannel))
         print("  ✓ User channels удалены")
         

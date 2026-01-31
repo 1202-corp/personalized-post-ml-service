@@ -9,8 +9,6 @@ from typing import List, Optional, Dict, Tuple
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.user import User
-from app.models.user_preference_vector import UserPreferenceVector
 from app.models.taste_cluster import TasteCluster
 from app.repositories.taste_cluster_repository import TasteClusterRepository
 from app.repositories.user_channel_preference_vector_repository import UserChannelPreferenceVectorRepository
@@ -26,25 +24,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-
-
-async def get_users_with_preference_vectors(session: AsyncSession) -> List[Tuple[User, List[float]]]:
-    """Legacy: get all non-deleted users that have a global preference vector. Returns list of (User, vector)."""
-    result = await session.execute(
-        select(User, UserPreferenceVector.preference_vector).join(
-            UserPreferenceVector,
-            User.id == UserPreferenceVector.user_id,
-        ).where(
-            User.is_deleted == False,
-            UserPreferenceVector.preference_vector.isnot(None),
-        )
-    )
-    rows = result.all()
-    out = []
-    for user, pv in rows:
-        if pv and isinstance(pv, list) and len(pv) > 0:
-            out.append((user, pv))
-    return out
 
 
 async def get_users_with_preference_vectors_for_channel(
@@ -199,12 +178,11 @@ async def assign_user_to_nearest_cluster(
     session: AsyncSession,
     user_id: int,
     preference_vector: List[float],
-    channel_id: Optional[int] = None,
+    channel_id: int,
 ) -> Optional[int]:
     """
     Assign user to the nearest taste cluster by centroid similarity (cosine).
-    If channel_id is given, uses per-channel clusters and UserChannelTaste; otherwise legacy User.taste_cluster_id.
-    Returns cluster_id or None if no clusters exist.
+    Uses per-channel clusters and UserChannelTaste. Returns cluster_id or None if no clusters exist.
     """
     from app.services.utils import cosine_similarity
 
@@ -225,16 +203,8 @@ async def assign_user_to_nearest_cluster(
     if best_id is None:
         return None
 
-    if channel_id is not None:
-        await UserChannelTasteRepository.upsert(
-            session, user_id, channel_id, best_id
-        )
-        await session.flush()
-    else:
-        user = await session.get(User, user_id)
-        if user:
-            user.taste_cluster_id = best_id
-            await session.flush()
+    await UserChannelTasteRepository.upsert(session, user_id, channel_id, best_id)
+    await session.flush()
     return best_id
 
 

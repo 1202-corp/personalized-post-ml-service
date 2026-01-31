@@ -3,7 +3,6 @@ from typing import List, Optional
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.taste_cluster import TasteCluster
-from app.models.user import User
 
 
 class TasteClusterRepository:
@@ -13,7 +12,7 @@ class TasteClusterRepository:
     async def get_all(
         db: AsyncSession, channel_id: Optional[int] = None
     ) -> List[TasteCluster]:
-        """Get taste clusters with centroids. If channel_id given, only that channel (or legacy global if channel_id is None and we want all)."""
+        """Get taste clusters with centroids. If channel_id given, only that channel."""
         q = select(TasteCluster).where(TasteCluster.centroid.isnot(None))
         if channel_id is not None:
             q = q.where(TasteCluster.channel_id == channel_id)
@@ -27,22 +26,6 @@ class TasteClusterRepository:
             select(TasteCluster).where(TasteCluster.id == cluster_id)
         )
         return result.scalar_one_or_none()
-
-    @staticmethod
-    async def get_user_ids_by_cluster_ids(
-        db: AsyncSession,
-        cluster_ids: List[int],
-    ) -> List[int]:
-        """Get user IDs that belong to any of the given cluster IDs (legacy: from User.taste_cluster_id)."""
-        if not cluster_ids:
-            return []
-        result = await db.execute(
-            select(User.id).where(
-                User.taste_cluster_id.in_(cluster_ids),
-                User.is_deleted == False,
-            )
-        )
-        return [row[0] for row in result.all()]
 
     @staticmethod
     async def delete_all(

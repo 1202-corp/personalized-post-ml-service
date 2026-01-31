@@ -34,10 +34,11 @@ async def recalculate_taste_clusters_endpoint(
 
 @router.get("/stats")
 async def get_taste_cluster_stats(session: AsyncSession = Depends(get_session)):
-    """Statistics about taste clusters (per channel) and user assignment (UserChannelTaste)."""
+    """Statistics about taste clusters (per channel) and user assignment (UserChannelTaste). Legacy (channel_id=NULL) clusters excluded."""
     result = await session.execute(
         select(TasteCluster.id, TasteCluster.channel_id, TasteCluster.user_count).where(
-            TasteCluster.centroid.isnot(None)
+            TasteCluster.centroid.isnot(None),
+            TasteCluster.channel_id.isnot(None),
         )
     )
     rows = result.all()

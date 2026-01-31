@@ -14,7 +14,6 @@ import httpx
 from app.config import get_settings
 from app.services import embedding_service, qdrant_service
 from app.repositories.user_repository import UserRepository
-from app.repositories.user_preference_vector_repository import UserPreferenceVectorRepository
 from app.repositories.user_channel_preference_vector_repository import UserChannelPreferenceVectorRepository
 from app.repositories.user_channel_taste_repository import UserChannelTasteRepository
 from app.repositories.post_repository import PostRepository
@@ -208,6 +207,10 @@ async def predict(
             )
             preference_vector = pv_row.preference_vector if pv_row else None
             if not preference_vector:
+                logger.info(
+                    f"[PREDICT] user_telegram_id={user_telegram_id} channel_id={cid} post_id={post_id}: "
+                    "no preference vector -> score 0 (cold channel or not trained for this channel)"
+                )
                 predictions[post_id] = 0.0
                 continue
             score = _cosine_similarity(preference_vector, post_embeddings[post_id])

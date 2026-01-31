@@ -29,9 +29,4 @@ class TasteCluster(Base):
     )
 
     channel: Mapped[Optional["Channel"]] = relationship(back_populates="taste_clusters")
-    # Legacy: users with User.taste_cluster_id pointing here (deprecated; per-channel uses UserChannelTaste)
-    users: Mapped[List["User"]] = relationship(
-        back_populates="taste_cluster",
-        foreign_keys="User.taste_cluster_id",
-    )
 
